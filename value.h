@@ -51,13 +51,11 @@ std::size_t TypeID()
 template<typename Ty>
 void Serializer(std::ostream& out, const ObjectServices::storage_t* ptr)
 {
-    if(ptr == nullptr)
+    if constexpr (std::is_same_v<std::nullptr_t, Ty>)
     {
         Serialize(out, nullptr);
-        return;
     }
-
-    if constexpr (in_place_v<Ty>)
+    else if (in_place_v<Ty>)
     {
         Serialize(out, *std::launder(reinterpret_cast<const Ty*>(ptr)));
     }
@@ -106,7 +104,9 @@ template<typename Ty>
 const ObjectServices& GetObjectServices()
 {
     static ObjectServices services {
+#ifndef NDEBUG
         TypeID<Ty>(),
+#endif
         Serializer<Ty>,
         Copier<Ty>,
         Deleter<Ty>
@@ -117,50 +117,66 @@ const ObjectServices& GetObjectServices()
 
 struct ValueBase
 {
-    ValueBase() :
-        info_{nullptr}
-    {
+    using MetaType = char;
 
+    static_assert(in_place_v<MetaType>, "Invalid MetoType size");
+
+    ValueBase() noexcept
+    {
+        info_ = nullptr;
+        Creator<MetaType>(&storage_, 0);
     }
 
     template<typename Ty>
-    ValueBase(Ty value) :
-        info_{GetObjectServices<OriginalType<Ty>>}
+    ValueBase(Ty value) noexcept(in_place_v<Ty>)
     {
+        info_ = GetObjectServices<OriginalType<Ty>>;
         Creator<OriginalType<Ty>>(&storage_, std::move(value));
     }
 
     template<typename Ty>
-    ValueBase(std::optional<Ty> value) :
-        info_{nullptr}
+    ValueBase(std::optional<Ty> value) noexcept(in_place_v<Ty>)
     {
         if(value.has_value())
         {
             info_ = GetObjectServices<OriginalType<Ty>>;
-            Creator<OriginalType<Ty>>(&storage_, *value);
+            Creator<OriginalType<Ty>>(&storage_, std::move(*value));
+        }
+        else
+        {
+            info_ = nullptr;
+            Creator<MetaType>(&storage_, 0);
         }
     }
 
-    ValueBase(const ValueBase& value_base) :
-        info_{value_base.info_}
+    ValueBase(const ValueBase& value_base)
     {
-        if(value_base.info_ == nullptr)
-            return;
-
-        info_().copier(&storage_, &value_base.storage_);
+        if(value_base.info_ != nullptr)
+        {
+            info_ = value_base.info_;
+            info_().copier(&storage_, &value_base.storage_);
+        }
+        else
+        {
+            info_ = nullptr;
+            storage_ = value_base.storage_;
+        }
     }
 
-    ValueBase(ValueBase&& value_base) noexcept :
-        info_{std::exchange(value_base.info_, nullptr)}
+    ValueBase(ValueBase&& value_base) noexcept
     {
-        if(info_ == nullptr)
-            return;
-
+        info_ = value_base.info_;
         storage_ = value_base.storage_;
+
+        value_base.info_ = nullptr;
+        Creator<MetaType>(&value_base.storage_, 0);
     }
 
     ValueBase& operator=(const ValueBase& value_base)
     {
+        if(this == std::addressof(value_base))
+            return *this;
+
         ValueBase tmp{value_base};
         *this = std::move(tmp);
         return *this;
@@ -168,15 +184,17 @@ struct ValueBase
 
     ValueBase& operator=(ValueBase&& value_base) noexcept
     {
+        if(this == std::addressof(value_base))
+            return *this;
+
         if(info_ != nullptr)
             info_().deleter(&storage_);
 
-        info_ = std::exchange(value_base.info_, nullptr);
-
-        if(info_ == nullptr)
-            return *this;
-
+        info_ = value_base.info_;
         storage_ = value_base.storage_;
+
+        value_base.info_ = nullptr;
+        Creator<MetaType>(&value_base.storage_, 0);
 
         return *this;
     }
@@ -197,52 +215,59 @@ struct ValueBase
 class Value : ValueBase
 {
 public:
-    Value() :
-        ValueBase{}
-    {
+    using ValueBase::ValueBase;
 
+    bool HasValue() const noexcept
+    {
+        return info_ != nullptr;
     }
 
     template<typename Ty>
-    Value(Ty value) :
-        ValueBase{std::move(value)}
+    const Ty& As() const noexcept
     {
+        assert(HasValue());
 
-    }
+        assert(info_().id == TypeID<Ty>());
 
-    template<typename Ty>
-    Value(std::optional<Ty> value) :
-        ValueBase{std::move(value)}
-    {
-
-    }
-
-    template<typename Ty>
-    Ty& As()
-    {
-        assert(info_ != nullptr);
-
-#ifndef NDEBUG
-        if(info_().id != TypeID<Ty>())
-            throw std::invalid_argument{"Invalid type"};
-#endif
         if constexpr(in_place_v<OriginalType<Ty>>)
         {
-            return *std::launder(reinterpret_cast<OriginalType<Ty>*>(&storage_));
+            return *std::launder(reinterpret_cast<const OriginalType<Ty>*>(&storage_));
         }
         else
         {
-            return **std::launder(reinterpret_cast<OriginalType<Ty>**>(&storage_));
+            return **std::launder(reinterpret_cast<const OriginalType<Ty>**>(&storage_));
         }
     }
 
     template<typename Ty>
-    std::optional<Ty> AsOpt()
+    Ty& As() noexcept
     {
-        if(info_ == nullptr)
-            return {};
+        return const_cast<Ty&>(static_cast<const Value*>(this)->As<Ty>());
+    }
 
-        return {As<Ty>()};
+    template<typename Ty>
+    std::optional<Ty> AsOpt() const
+    {
+        if(HasValue())
+            return {As<Ty>()};
+
+        return {};
+    }
+
+    void SetMeta(MetaType value) noexcept
+    {
+        if(info_ != nullptr)
+            info_().deleter(&storage_);
+
+        info_ = nullptr;
+        Creator<MetaType>(&storage_, value);
+    }
+
+    MetaType GetMeta() const noexcept
+    {
+        assert(info_ == nullptr);
+
+        return *std::launder(reinterpret_cast<const MetaType*>(&storage_));
     }
 private:
 
