@@ -1,8 +1,11 @@
 #pragma once
 
 #include <string>
-#include <unordered_map>
+#include <memory>
+#include <vector>
+#include <functional>
 
+#include "serializer.h"
 #include "value.h"
 
 using Record = std::unordered_map<std::string, Value>;

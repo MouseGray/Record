@@ -3,12 +3,12 @@
 #include <ostream>
 
 template<typename Ty>
-void Serialize(std::ostream& out, Ty value)
+void Serialize(std::ostream& out, const Ty& value)
 {
     out << value;
 }
 
-inline void Serialize(std::ostream& out, std::string a)
+inline void Serialize(std::ostream& out, const std::string& a)
 {
     out << "\"" << a << "\"";
 }
